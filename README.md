@@ -31,6 +31,8 @@ Or double-click `start_gui.bat` (Windows).
 3. Set Deliver output folder, preset (type manually or **Load presets**), and output base name.
 4. **Run Deliver** — clears the render queue, queues one job per segment, starts rendering with a timeout.
 
+**Timeline markers:** If you only press **`M`** and never set a **duration**, Resolve often stores **0 or 1 frame**. Exporting that range makes `MarkIn == MarkOut` and many players show broken files. This tool **auto-extends** such markers **to the next marker**; the **last** marker extends only to the **end of real clips** on video tracks (`GetItemListInTrack` / `GetEnd()`), not Resolve’s long empty `GetEndFrame()` tail (which used to create huge broken exports).
+
 Uses one `scripting_thread()` block for connect → build chapter list → queue jobs → render (same patterns as Blackmagic’s scripting notes: forward slashes via `to_forward`, preset fallback, `DeleteAllRenderJobs`, bounded render wait).
 
 ## ffmpeg tab (fallback)

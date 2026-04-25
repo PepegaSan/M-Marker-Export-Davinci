@@ -32,6 +32,38 @@ def _timeline_rel_end_exclusive(timeline: Any, start_abs: int, fps: float) -> in
         return fps_i * 3600 * 24
 
 
+def _timeline_content_end_rel_exclusive(timeline: Any, start_abs: int) -> Optional[int]:
+    """Right edge of **actual media** on video tracks, as relative exclusive end frame.
+
+    ``TimelineItem.GetEnd()`` is the first timeline frame *after* the clip (half-open
+    clip interval on the timeline). We take the maximum across all video tracks and
+    convert to the same relative coordinate system as markers / Deliver MarkIn.
+    """
+    startf = int(start_abs) if start_abs else 0
+    max_end_excl_abs: Optional[int] = None
+    try:
+        n = int(timeline.GetTrackCount("video") or 0)
+    except Exception:
+        n = 0
+    for ti in range(1, n + 1):
+        try:
+            items = timeline.GetItemListInTrack("video", ti) or []
+        except Exception:
+            items = []
+        for it in items:
+            try:
+                end_excl = int(it.GetEnd())
+            except Exception:
+                continue
+            max_end_excl_abs = (
+                end_excl if max_end_excl_abs is None else max(max_end_excl_abs, end_excl)
+            )
+    if max_end_excl_abs is None:
+        return None
+    rel_excl = max_end_excl_abs - startf
+    return max(rel_excl, 1)
+
+
 def _marker_frame_to_rel(frame_id: int, start_abs: int) -> int:
     """Resolve marker keys may be absolute (>= timeline start) or already relative."""
     f = int(frame_id)
@@ -45,7 +77,7 @@ def _chapters_from_timeline_markers(
     timeline: Any,
     *,
     include_zero_duration: bool,
-) -> Tuple[List[Chapter], float]:
+) -> Tuple[List[Chapter], float, int]:
     fps_raw = (
         timeline.GetSetting("timelineFrameRate")
         or project.GetSetting("timelineFrameRate")
@@ -54,6 +86,9 @@ def _chapters_from_timeline_markers(
     fps = float(str(fps_raw).strip())
     start_abs = _timeline_start_abs_frame(timeline, fps)
     rel_end_ex = _timeline_rel_end_exclusive(timeline, start_abs, fps)
+    content_end_ex = _timeline_content_end_rel_exclusive(timeline, start_abs)
+    if content_end_ex is not None and content_end_ex < rel_end_ex:
+        rel_end_ex = content_end_ex
 
     markers = timeline.GetMarkers() or {}
     # Preserve original dict keys (type may vary) but sort by relative frame.
@@ -100,7 +135,7 @@ def _chapters_from_timeline_markers(
         )
     if not chapters:
         raise RuntimeError("No markers found on the current timeline.")
-    return chapters, fps
+    return chapters, fps, rel_end_ex
 
 
 def _load_render_preset(project: Any, preset_name: Optional[str], log: Callable[[str], None]) -> None:
@@ -269,10 +304,14 @@ def run_resolve_deliver(
             raise RuntimeError("No current timeline in Resolve.")
 
         if src == "timeline":
-            chapters, fps = _chapters_from_timeline_markers(
+            chapters, fps, rel_end_used = _chapters_from_timeline_markers(
                 project, timeline, include_zero_duration=include_zero_duration
             )
-            log(f"Timeline @ {fps:g} fps — {len(chapters)} marker segment(s).\n")
+            log(
+                f"Timeline @ {fps:g} fps — {len(chapters)} marker segment(s). "
+                f"Relative timeline end used for last segment: {rel_end_used} "
+                "(min of Resolve timeline end vs last clip GetEnd()).\n"
+            )
         else:
             if not sidecar_path or not sidecar_path.is_file():
                 raise RuntimeError("Choose a valid FCPXML or EDL file.")
