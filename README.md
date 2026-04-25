@@ -1,56 +1,62 @@
-# EDL / FCPXML marker autocut
+# M Marker Export (DaVinci Resolve)
 
-Small **CustomTkinter** tool focused on **DaVinci Resolve Studio**: queue **Deliver** jobs so each timeline marker (or each range from an **FCPXML** / **EDL** sidecar) exports as its own file. An **ffmpeg** tab remains as a fallback when you only have a flat media file and no Resolve session.
+Small **CustomTkinter** desktop app: batch **Deliver** in **DaVinci Resolve Studio** from **timeline markers** or from **FCPXML / EDL** ranges. Optional **ffmpeg** tab splits one media file using the same sidecar (no Resolve required).
 
-## Status
+**UI language:** English only.
 
-**Beta.** Resolve scripting, preset names, sidecar-to-timeline frame alignment, and ffmpeg trims are easy to get wrong on edge cases. Spot-check outputs before long batch runs.
+## What it does
+
+- **Resolve Studio tab**
+  - **Timeline** — Build chapters from markers: **timeline ruler** (`timeline.GetMarkers`) or **source / clip** (`MediaPoolItem` + `TimelineItem.GetMarkers` on the playhead clip, else first clip on video track 1).
+  - **Between markers only (default on)** — For *N* markers you get *N−1* exports `[M₁, M₂)`, `[M₂, M₃)` … no extra tail clip starting at the last marker.
+  - **Extend last segment** — When “between markers” is off: extend the last chapter to timeline/clip end (with optional minutes cap).
+  - **FCPXML / EDL** — Ranges from file; MarkIn/MarkOut aligned to the active timeline timebase.
+  - Sequential Deliver jobs, render preset, output folder, logging.
+- **ffmpeg tab** — Sidecar + one media file → segment exports (`ffmpeg`, often `-c copy`).
+- **Settings (⚙)** — Optional Resolve install paths and default render preset; stored in `user_settings.json` (create from `user_settings.example.json`).
 
 ## Requirements
 
-- Python 3.10+
-- **Resolve Studio** with **External scripting = Local** (for the Resolve tab)
-- **`davinci_api.py`** in the project root (shipped here; mirrors `Davinci API start/davinci_api.py`)
-- **ffmpeg** on `PATH` (only for the ffmpeg fallback tab)
-- `pip install -r requirements.txt`
+- **Python** 3.10–3.12 (64-bit) on Windows  
+- **DaVinci Resolve Studio** with **External scripting = Local** (Resolve tab)  
+- **ffmpeg** on `PATH` (ffmpeg tab only)
 
-## Run
+## Install & run
 
-```powershell
-python app.py
+```bat
+install_requirements.bat
 ```
 
-Or double-click `start_gui.bat` (Windows).
+```bat
+start_gui.bat
+```
 
-## Resolve tab (main)
+Or: `python app.py`
 
-1. Open project + timeline in Resolve.
-2. Choose range source:
-   - **timeline** — `GetMarkers()` on the active timeline (duration per marker).
-   - **fcpxml** / **edl** — parse ranges; **MarkIn/MarkOut** use those as **timeline frame numbers** (your edit must match that timebase).
-3. Set Deliver output folder, preset (type manually or **Load presets**), and output base name.
-4. **Run Deliver** — clears the render queue, queues one job per segment, starts rendering with a timeout.
+## One-file `.exe` (optional)
 
-**Timeline markers:** Short markers extend **to the next**. The **last** marker extends to the **right edge of clips** (`GetStart`+`GetDuration` vs `GetEnd`, conservative `min` per clip), merged with `GetEndFrame()`. One long clip on the timeline still yields a **long last export** — cap it in the GUI with **“Last marker max length (min)”** (e.g. `10`). For fixed lengths, set marker **Duration** (≥ 2 frames). If files still won’t play, try **MOV / ProRes** instead of **YouTube / H.264**.
+```bat
+install_requirements.bat
+onefile.bat
+```
 
-Uses one `scripting_thread()` block for connect → build chapter list → queue jobs → render (same patterns as Blackmagic’s scripting notes: forward slashes via `to_forward`, preset fallback, `DeleteAllRenderJobs`, bounded render wait).
+Output: `dist\MMarkerExport.exe` (see `m_marker_export.spec`). Resolve and ffmpeg are **not** bundled.
 
-## ffmpeg tab (fallback)
+## Tested with
 
-Sidecar + one media file → `ffmpeg -c copy` segments. Same FPS / timebase caveats as before.
+- **DaVinci Resolve Studio** 18 / 19 (Windows), scripting enabled  
+- **Python** 3.12 (64-bit), **CustomTkinter** 5.2+
 
-## Repo layout
+## Repo contents (shipped)
 
-| Item | Role |
-|------|------|
-| `app.py` | GUI (tabs: Resolve · ffmpeg) |
+| File | Purpose |
+|------|---------|
+| `app.py` | GUI |
 | `resolve_export.py` | Resolve Deliver batch |
-| `chapters.py` | FCPXML/EDL parsing + ffmpeg export |
-| `davinci_api.py` | Resolve connection + render helpers (runtime) |
-| `theme_palette.py` | Colours |
-| `design_kit/` | **Reference only** |
-| `Davinci API start/` | **Reference copy** of the same API kit (optional duplicate) |
+| `chapters.py` | FCPXML/EDL + ffmpeg export |
+| `davinci_api.py` | Resolve connection helpers |
+| `theme_palette.py` | Light/dark palette |
 
 ## License
 
-MIT unless you specify otherwise.
+MIT unless stated otherwise.

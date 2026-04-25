@@ -5,3 +5,14 @@ venv/
 .env
 .idea/
 exports/
+user_settings.json
+build/
+dist/
+*.spec.bak
+UI.png
+
+# Not shipped in public repo (local / dev only)
+tests/
+scripts/
+design_kit/
+Davinci API start/

@@ -195,6 +195,12 @@ RESOLVE_DIAG_AFTER_S = 18.0
 DEFAULT_RENDER_PRESETS: Tuple[str, ...] = ("YouTube - 1080p", "H.264 Master")
 
 _DAVINCI_MODULE: Any = None  # cached across calls
+_LAST_MODULES_SYSPATH: Optional[str] = None  # sys.path entry we inserted for DaVinciResolveScript
+
+# Optional GUI / CLI overrides (set via :func:`set_resolve_install_overrides`).
+_USER_RESOLVE_EXE: Optional[str] = None
+_USER_MODULES_DIR: Optional[str] = None
+_USER_FUSIONSCRIPT_DLL: Optional[str] = None
 
 
 # ---------------------------------------------------------------------------
@@ -218,6 +224,65 @@ def _first_existing(paths: Tuple[str, ...]) -> Optional[str]:
         if os.path.isfile(p) or os.path.isdir(p):
             return p
     return None
+
+
+def set_resolve_install_overrides(
+    *,
+    resolve_exe: Optional[str] = None,
+    scripting_modules_dir: Optional[str] = None,
+    fusionscript_dll: Optional[str] = None,
+) -> None:
+    """Persisted GUI paths: custom ``Resolve.exe``, ``…\\Scripting\\Modules``, or ``fusionscript.dll``.
+
+    Empty strings clear an override. Clears the imported Resolve scripting module
+    so the next :func:`bootstrap_resolve_api` call re-binds with the new layout.
+    """
+    global _DAVINCI_MODULE, _USER_RESOLVE_EXE, _USER_MODULES_DIR, _USER_FUSIONSCRIPT_DLL
+    global _LAST_MODULES_SYSPATH
+
+    def _strip(path: Optional[str]) -> Optional[str]:
+        if path is None:
+            return None
+        s = str(path).strip()
+        if not s:
+            return None
+        return os.path.normpath(os.path.expandvars(s))
+
+    _USER_RESOLVE_EXE = _strip(resolve_exe)
+    if _USER_RESOLVE_EXE and not os.path.isfile(_USER_RESOLVE_EXE):
+        _USER_RESOLVE_EXE = None
+    raw_mod = _strip(scripting_modules_dir)
+    _USER_MODULES_DIR = _normalize_scripting_modules_dir(raw_mod) if raw_mod else None
+    raw_dll = _strip(fusionscript_dll)
+    _USER_FUSIONSCRIPT_DLL = raw_dll if (raw_dll and os.path.isfile(raw_dll)) else None
+
+    _DAVINCI_MODULE = None
+    sys.modules.pop("DaVinciResolveScript", None)
+    if _LAST_MODULES_SYSPATH and _LAST_MODULES_SYSPATH in sys.path:
+        try:
+            sys.path.remove(_LAST_MODULES_SYSPATH)
+        except ValueError:
+            pass
+    _LAST_MODULES_SYSPATH = None
+
+
+def _normalize_scripting_modules_dir(path: str) -> Optional[str]:
+    """Accept ``…\\Modules`` or parent ``…\\Scripting`` that contains ``Modules``."""
+    if os.path.isfile(os.path.join(path, "DaVinciResolveScript.py")):
+        return path
+    nested = os.path.join(path, "Modules")
+    if os.path.isfile(os.path.join(nested, "DaVinciResolveScript.py")):
+        return nested
+    return None
+
+
+def scripting_modules_dir_is_valid(raw: Optional[str]) -> bool:
+    """``True`` if empty (auto) or path contains ``DaVinciResolveScript.py``."""
+    if raw is None or not str(raw).strip():
+        return True
+    return _normalize_scripting_modules_dir(
+        os.path.normpath(os.path.expandvars(str(raw).strip()))
+    ) is not None
 
 
 def to_forward(path: Any) -> str:
@@ -354,6 +419,21 @@ def launch_resolve() -> bool:
     :func:`is_resolve_process_running` first and skipped this call on a
     hit — launching a second instance destabilises the scripting socket.
     """
+    if _USER_RESOLVE_EXE and os.path.isfile(_USER_RESOLVE_EXE):
+        exe = _USER_RESOLVE_EXE
+        creation = 0
+        if hasattr(subprocess, "DETACHED_PROCESS"):
+            creation = subprocess.DETACHED_PROCESS  # type: ignore[attr-defined]
+        try:
+            subprocess.Popen(
+                [exe],
+                close_fds=True,
+                creationflags=creation,
+                cwd=os.path.dirname(exe),
+            )
+            return True
+        except OSError:
+            pass
     for exe in _RESOLVE_EXE_CANDIDATES:
         if not os.path.isfile(exe):
             continue
@@ -447,7 +527,7 @@ def bootstrap_resolve_api() -> Any:
 
     The result is cached on module level — subsequent calls are no-ops.
     """
-    global _DAVINCI_MODULE
+    global _DAVINCI_MODULE, _LAST_MODULES_SYSPATH
     if _DAVINCI_MODULE is not None:
         return _DAVINCI_MODULE
 
@@ -457,20 +537,26 @@ def bootstrap_resolve_api() -> Any:
     lib_path: Optional[str] = None
     modules_dir: Optional[str] = None
 
+    if _USER_FUSIONSCRIPT_DLL and os.path.isfile(_USER_FUSIONSCRIPT_DLL):
+        lib_path = _USER_FUSIONSCRIPT_DLL
+    if _USER_MODULES_DIR and os.path.isdir(_USER_MODULES_DIR):
+        modules_dir = _USER_MODULES_DIR
+
     # Prefer files from the edition whose Resolve.exe is actually running.
     running_dir = running_resolve_dir()
     if running_dir:
         dll_candidate = os.path.join(running_dir, "fusionscript.dll")
-        if os.path.isfile(dll_candidate):
+        if lib_path is None and os.path.isfile(dll_candidate):
             lib_path = dll_candidate
-        edition = os.path.basename(running_dir)
-        mirrored_modules = os.path.join(
-            r"C:\ProgramData\Blackmagic Design",
-            edition,
-            r"Support\Developer\Scripting\Modules",
-        )
-        if os.path.isdir(mirrored_modules):
-            modules_dir = mirrored_modules
+        if modules_dir is None:
+            edition = os.path.basename(running_dir)
+            mirrored_modules = os.path.join(
+                r"C:\ProgramData\Blackmagic Design",
+                edition,
+                r"Support\Developer\Scripting\Modules",
+            )
+            if os.path.isdir(mirrored_modules):
+                modules_dir = mirrored_modules
 
     if modules_dir is None:
         modules_dir = _first_existing(_RESOLVE_MODULE_DIRS)
@@ -492,6 +578,7 @@ def bootstrap_resolve_api() -> Any:
 
     if modules_dir not in sys.path:
         sys.path.insert(0, modules_dir)
+    _LAST_MODULES_SYSPATH = modules_dir
 
     # NOTE: Resolve 21's DaVinciResolveScript.py ends with
     # ``sys.modules[__name__] = script_module``. If the DLL fails to load
