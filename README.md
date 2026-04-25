@@ -31,7 +31,7 @@ Or double-click `start_gui.bat` (Windows).
 3. Set Deliver output folder, preset (type manually or **Load presets**), and output base name.
 4. **Run Deliver** — clears the render queue, queues one job per segment, starts rendering with a timeout.
 
-**Timeline markers:** If you only press **`M`** and never set a **duration**, Resolve often stores **0 or 1 frame**. Exporting that range makes `MarkIn == MarkOut` and many players show broken files. This tool **auto-extends** such markers **to the next marker**; the **last** marker extends only to the **end of real clips** on video tracks (`GetItemListInTrack` / `GetEnd()`), not Resolve’s long empty `GetEndFrame()` tail (which used to create huge broken exports).
+**Timeline markers:** Short markers extend **to the next**. The **last** marker extends to the **right edge of clips** (`GetStart`+`GetDuration` vs `GetEnd`, conservative `min` per clip), merged with `GetEndFrame()`. One long clip on the timeline still yields a **long last export** — cap it in the GUI with **“Last marker max length (min)”** (e.g. `10`). For fixed lengths, set marker **Duration** (≥ 2 frames). If files still won’t play, try **MOV / ProRes** instead of **YouTube / H.264**.
 
 Uses one `scripting_thread()` block for connect → build chapter list → queue jobs → render (same patterns as Blackmagic’s scripting notes: forward slashes via `to_forward`, preset fallback, `DeleteAllRenderJobs`, bounded render wait).
 

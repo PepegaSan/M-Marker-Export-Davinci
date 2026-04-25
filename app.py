@@ -40,6 +40,8 @@ class AutocutApp(ctk.CTk):
         self.preset_var = tk.StringVar(value="YouTube - 1080p")
         self.base_name_var = tk.StringVar(value="chapter")
         self.zero_duration_var = tk.BooleanVar(value=False)
+        # If last timeline marker has no "next marker", cap its length (minutes).
+        self.last_marker_cap_min_var = tk.StringVar(value="")
 
         # ffmpeg fallback
         self.sidecar_ff_var = tk.StringVar()
@@ -175,6 +177,22 @@ class AutocutApp(ctk.CTk):
             font=FONT_UI,
         )
         self._chk_zero.pack(side="left")
+        r += 1
+
+        self._lbl_last_cap = ctk.CTkLabel(
+            tr,
+            text="Last marker max length (min, optional)",
+            font=FONT_UI,
+            fg_color="transparent",
+        )
+        self._lbl_last_cap.grid(row=r, column=0, sticky="w", padx=10, pady=6)
+        self._ent_last_cap = ctk.CTkEntry(
+            tr,
+            textvariable=self.last_marker_cap_min_var,
+            placeholder_text="e.g. 10 — empty = full clip/timeline end",
+            font=FONT_UI,
+        )
+        self._ent_last_cap.grid(row=r, column=1, columnspan=2, sticky="ew", padx=10, pady=6)
         r += 1
 
         self._btn_resolve = ctk.CTkButton(
@@ -355,6 +373,7 @@ class AutocutApp(ctk.CTk):
             self._lbl_out_r,
             self._lbl_preset,
             self._lbl_base,
+            self._lbl_last_cap,
             self._lbl_sff,
             self._lbl_scf,
             self._lbl_mf,
@@ -383,6 +402,7 @@ class AutocutApp(ctk.CTk):
             self._ent_fps_r,
             self._ent_out_r,
             self._ent_base,
+            self._ent_last_cap,
             self._ent_scf,
             self._ent_mf,
             self._ent_fpsf,
@@ -522,6 +542,21 @@ class AutocutApp(ctk.CTk):
         preset = self.preset_var.get().strip() or None
         base = self.base_name_var.get().strip() or "chapter"
 
+        last_cap_min_raw = (self.last_marker_cap_min_var.get() or "").strip().replace(",", ".")
+        last_marker_max_sec: float | None = None
+        if last_cap_min_raw:
+            try:
+                m = float(last_cap_min_raw)
+                if m <= 0:
+                    raise ValueError
+                last_marker_max_sec = m * 60.0
+            except ValueError:
+                messagebox.showerror(
+                    "Last marker cap",
+                    "Optional 'Last marker max length' must be a positive number (minutes), or leave empty.",
+                )
+                return
+
         self._set_busy(True)
         self._lbl_status.configure(text="Resolve…")
         self._progress.set(0)
@@ -537,6 +572,7 @@ class AutocutApp(ctk.CTk):
                     base_name=base,
                     preset_name=preset,
                     include_zero_duration=self.zero_duration_var.get(),
+                    last_marker_max_sec=last_marker_max_sec,
                     status_callback=lambda m: self.log_queue.put(m),
                 )
                 self.log_queue.put(f"Done. Output: {out_dir}\n")

@@ -35,9 +35,9 @@ def _timeline_rel_end_exclusive(timeline: Any, start_abs: int, fps: float) -> in
 def _timeline_content_end_rel_exclusive(timeline: Any, start_abs: int) -> Optional[int]:
     """Right edge of **actual media** on video tracks, as relative exclusive end frame.
 
-    ``TimelineItem.GetEnd()`` is the first timeline frame *after* the clip (half-open
-    clip interval on the timeline). We take the maximum across all video tracks and
-    convert to the same relative coordinate system as markers / Deliver MarkIn.
+    For each clip we take the **tighter** of ``GetEnd()`` and ``GetStart()+GetDuration()``
+    when both exist (API quirks / handles can make ``GetEnd()`` sit past real media).
+    Across all video tracks we then take the **maximum** (rightmost timeline edge).
     """
     startf = int(start_abs) if start_abs else 0
     max_end_excl_abs: Optional[int] = None
@@ -52,11 +52,27 @@ def _timeline_content_end_rel_exclusive(timeline: Any, start_abs: int) -> Option
             items = []
         for it in items:
             try:
-                end_excl = int(it.GetEnd())
+                s_abs = int(it.GetStart())
             except Exception:
                 continue
+            candidates: List[int] = []
+            try:
+                candidates.append(int(it.GetEnd()))
+            except Exception:
+                pass
+            try:
+                du = int(it.GetDuration())
+                if du > 0:
+                    candidates.append(s_abs + du)
+            except Exception:
+                pass
+            if not candidates:
+                continue
+            end_excl_abs = min(candidates)
             max_end_excl_abs = (
-                end_excl if max_end_excl_abs is None else max(max_end_excl_abs, end_excl)
+                end_excl_abs
+                if max_end_excl_abs is None
+                else max(max_end_excl_abs, end_excl_abs)
             )
     if max_end_excl_abs is None:
         return None
@@ -77,6 +93,7 @@ def _chapters_from_timeline_markers(
     timeline: Any,
     *,
     include_zero_duration: bool,
+    last_marker_max_sec: Optional[float] = None,
 ) -> Tuple[List[Chapter], float, int]:
     fps_raw = (
         timeline.GetSetting("timelineFrameRate")
@@ -118,6 +135,10 @@ def _chapters_from_timeline_markers(
                 end_ex = next_start
             else:
                 end_ex = rel_end_ex
+                if last_marker_max_sec is not None and last_marker_max_sec > 0:
+                    cap_ex = start_f + int(last_marker_max_sec * fps)
+                    if cap_ex < end_ex:
+                        end_ex = cap_ex
 
         end_ex = max(start_f + 1, min(end_ex, rel_end_ex))
         if start_f >= rel_end_ex:
@@ -276,6 +297,7 @@ def run_resolve_deliver(
     base_name: str,
     preset_name: Optional[str],
     include_zero_duration: bool,
+    last_marker_max_sec: Optional[float] = None,
     status_callback: Callable[[str], None],
     timeout_s: float = 7200.0,
 ) -> None:
@@ -305,12 +327,21 @@ def run_resolve_deliver(
 
         if src == "timeline":
             chapters, fps, rel_end_used = _chapters_from_timeline_markers(
-                project, timeline, include_zero_duration=include_zero_duration
+                project,
+                timeline,
+                include_zero_duration=include_zero_duration,
+                last_marker_max_sec=last_marker_max_sec,
+            )
+            cap_note = (
+                f" | last-marker cap: {last_marker_max_sec:g}s"
+                if last_marker_max_sec and last_marker_max_sec > 0
+                else ""
             )
             log(
                 f"Timeline @ {fps:g} fps — {len(chapters)} marker segment(s). "
-                f"Relative timeline end used for last segment: {rel_end_used} "
-                "(min of Resolve timeline end vs last clip GetEnd()).\n"
+                f"Extend-to boundary for last marker (no next marker): rel_end={rel_end_used} "
+                "(min of GetEndFrame vs clip-stack)"
+                f"{cap_note}.\n"
             )
         else:
             if not sidecar_path or not sidecar_path.is_file():
