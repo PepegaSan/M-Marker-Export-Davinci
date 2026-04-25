@@ -27,6 +27,11 @@ def _slug(value: str) -> str:
     return value or "chapter"
 
 
+def slugify_marker_name(value: str) -> str:
+    """Safe fragment for filenames / Resolve CustomName (used by Resolve + ffmpeg)."""
+    return _slug(value)
+
+
 def _parse_tc(tc: str, fps: float) -> int:
     m = re.match(r"^\s*(\d+):(\d+):(\d+):(\d+)\s*$", tc or "")
     if not m:
@@ -127,7 +132,7 @@ def export_with_ffmpeg(
     for n, c in enumerate(chapters, start=1):
         start_s = c.start_frame / fps
         dur_s = c.duration_frames / fps
-        name = f"{c.index:03d}_{_slug(c.name)}"
+        name = f"{c.index:03d}_{slugify_marker_name(c.name)}"
         out_file = out_dir / f"{name}{media_file.suffix}"
 
         cmd = [

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Small GUI: FCPXML or EDL + one media file -> ffmpeg stream-copy segments."""
+"""GUI: DaVinci Resolve Deliver batch (main) + optional ffmpeg split (fallback)."""
 from __future__ import annotations
 
 import queue
@@ -11,12 +11,8 @@ from typing import Literal
 
 import customtkinter as ctk
 
-from chapters import (
-    Chapter,
-    chapters_from_edl,
-    chapters_from_fcpxml,
-    export_with_ffmpeg,
-)
+from chapters import Chapter, chapters_from_edl, chapters_from_fcpxml, export_with_ffmpeg
+from resolve_export import list_render_presets_sync, run_resolve_deliver
 from theme_palette import PALETTE_DARK, PALETTE_LIGHT
 
 ROOT = Path(__file__).resolve().parent
@@ -36,24 +32,35 @@ class AutocutApp(ctk.CTk):
         self._pal: dict[str, str] = dict(PALETTE_DARK)
         self._appearance = ctk.StringVar(value="dark")
 
-        self.source_var = tk.StringVar(value="fcpxml")
-        self.sidecar_var = tk.StringVar()
+        # Resolve (main)
+        self.range_source_var = tk.StringVar(value="timeline")
+        self.sidecar_resolve_var = tk.StringVar()
+        self.fps_resolve_var = tk.StringVar(value="25")
+        self.out_resolve_var = tk.StringVar(value=str(ROOT / "exports" / "resolve_clips"))
+        self.preset_var = tk.StringVar(value="YouTube - 1080p")
+        self.base_name_var = tk.StringVar(value="chapter")
+        self.zero_duration_var = tk.BooleanVar(value=False)
+
+        # ffmpeg fallback
+        self.sidecar_ff_var = tk.StringVar()
+        self.source_ff_var = tk.StringVar(value="fcpxml")
         self.media_var = tk.StringVar()
-        self.fps_var = tk.StringVar(value="25")
-        self.out_dir_var = tk.StringVar(value="exports/clips")
+        self.fps_ff_var = tk.StringVar(value="25")
+        self.out_ff_var = tk.StringVar(value=str(ROOT / "exports" / "ffmpeg_clips"))
         self.overwrite_var = tk.BooleanVar(value=False)
 
         self.log_queue: queue.Queue[str] = queue.Queue()
         self._worker: threading.Thread | None = None
 
-        self.title("EDL / FCPXML marker autocut")
-        self.geometry("880x640")
-        self.minsize(760, 560)
+        self.title("Marker autocut — Resolve Studio")
+        self.geometry("920x700")
+        self.minsize(800, 620)
         self.grid_columnconfigure(0, weight=1)
         self.grid_rowconfigure(1, weight=1)
 
         self._build()
         self._apply_palette()
+        self._update_resolve_rows()
         self.after(120, self._drain_log)
 
     def _build(self) -> None:
@@ -62,17 +69,12 @@ class AutocutApp(ctk.CTk):
         top.grid_columnconfigure(1, weight=1)
         self._lbl_title = ctk.CTkLabel(
             top,
-            text="Marker autocut (FCPXML / EDL + ffmpeg)",
-            font=("Segoe UI Semibold", 16),
+            text="Marker autocut — Resolve Studio (main) · ffmpeg (fallback)",
+            font=("Segoe UI Semibold", 15),
             fg_color="transparent",
         )
         self._lbl_title.grid(row=0, column=0, padx=14, pady=12, sticky="w")
-        self._lbl_status = ctk.CTkLabel(
-            top,
-            text="Ready",
-            font=FONT_UI,
-            fg_color="transparent",
-        )
+        self._lbl_status = ctk.CTkLabel(top, text="Ready", font=FONT_UI, fg_color="transparent")
         self._lbl_status.grid(row=0, column=1, padx=8, pady=12, sticky="w")
         self._seg_appearance = ctk.CTkSegmentedButton(
             top,
@@ -84,119 +86,228 @@ class AutocutApp(ctk.CTk):
         self._seg_appearance.grid(row=0, column=2, padx=12, pady=8, sticky="e")
 
         body = ctk.CTkFrame(self, corner_radius=10, border_width=1)
-        body.grid(row=1, column=0, sticky="nsew", padx=12, pady=(0, 10))
-        body.grid_columnconfigure(1, weight=1)
-        body.grid_rowconfigure(6, weight=1)
+        body.grid(row=1, column=0, sticky="nsew", padx=12, pady=(0, 6))
+        body.grid_columnconfigure(0, weight=1)
+        body.grid_rowconfigure(0, weight=1)
 
+        self._tabs = ctk.CTkTabview(body)
+        self._tabs.grid(row=0, column=0, sticky="nsew", padx=8, pady=8)
+
+        tr = self._tabs.add("Resolve Studio")
+        tr.grid_columnconfigure(1, weight=1)
         r = 0
-        self._card_title = ctk.CTkLabel(
-            body,
-            text="Inputs",
-            font=FONT_SECTION,
+        self._tr_hint = ctk.CTkLabel(
+            tr,
+            text="Open your project and timeline in Resolve. Uses Deliver: one job per segment (MarkIn/MarkOut).",
+            font=FONT_HINT,
             fg_color="transparent",
+            anchor="w",
+            wraplength=820,
         )
-        self._card_title.grid(row=r, column=0, columnspan=3, sticky="w", padx=12, pady=(12, 4))
-
+        self._tr_hint.grid(row=r, column=0, columnspan=3, sticky="ew", padx=10, pady=(8, 4))
         r += 1
-        self._lbl_src = ctk.CTkLabel(body, text="Sidecar type", font=FONT_UI, fg_color="transparent")
-        self._lbl_src.grid(row=r, column=0, sticky="w", padx=12, pady=6)
-        self._seg_source = ctk.CTkSegmentedButton(
-            body,
-            values=["fcpxml", "edl"],
-            variable=self.source_var,
+
+        self._lbl_range = ctk.CTkLabel(tr, text="Range source", font=FONT_UI, fg_color="transparent")
+        self._lbl_range.grid(row=r, column=0, sticky="w", padx=10, pady=6)
+        self._seg_range = ctk.CTkSegmentedButton(
+            tr,
+            values=["timeline", "fcpxml", "edl"],
+            variable=self.range_source_var,
+            command=lambda _v: self._update_resolve_rows(),
             font=("Segoe UI", 12),
         )
-        self._seg_source.grid(row=r, column=1, columnspan=2, sticky="ew", padx=10, pady=6)
-
+        self._seg_range.grid(row=r, column=1, columnspan=2, sticky="ew", padx=10, pady=6)
         r += 1
-        self._lbl_sidecar = ctk.CTkLabel(body, text="FCPXML / EDL file", font=FONT_UI, fg_color="transparent")
-        self._lbl_sidecar.grid(row=r, column=0, sticky="w", padx=12, pady=6)
-        self._ent_sidecar = ctk.CTkEntry(
-            body,
-            textvariable=self.sidecar_var,
-            placeholder_text="Path to .fcpxml / .xml or .edl",
+
+        self._lbl_sc_r = ctk.CTkLabel(tr, text="FCPXML / EDL file", font=FONT_UI, fg_color="transparent")
+        self._lbl_sc_r.grid(row=r, column=0, sticky="w", padx=10, pady=6)
+        self._ent_sc_r = ctk.CTkEntry(
+            tr,
+            textvariable=self.sidecar_resolve_var,
+            placeholder_text="Only when source is FCPXML or EDL",
             font=FONT_UI,
         )
-        self._ent_sidecar.grid(row=r, column=1, sticky="ew", padx=10, pady=6)
-        self._btn_sidecar = ctk.CTkButton(body, text="Browse", width=88, command=self._browse_sidecar)
-        self._btn_sidecar.grid(row=r, column=2, padx=10, pady=6)
-
+        self._ent_sc_r.grid(row=r, column=1, sticky="ew", padx=10, pady=6)
+        self._btn_sc_r = ctk.CTkButton(tr, text="Browse", width=88, command=self._browse_sidecar_resolve)
+        self._btn_sc_r.grid(row=r, column=2, padx=10, pady=6)
         r += 1
-        self._lbl_media = ctk.CTkLabel(body, text="Media file", font=FONT_UI, fg_color="transparent")
-        self._lbl_media.grid(row=r, column=0, sticky="w", padx=12, pady=6)
-        self._ent_media = ctk.CTkEntry(
-            body,
-            textvariable=self.media_var,
-            placeholder_text="Video/audio to split (same timeline as sidecar)",
+
+        self._lbl_fps_r = ctk.CTkLabel(tr, text="FPS (FCPXML/EDL only)", font=FONT_UI, fg_color="transparent")
+        self._lbl_fps_r.grid(row=r, column=0, sticky="w", padx=10, pady=6)
+        self._ent_fps_r = ctk.CTkEntry(tr, textvariable=self.fps_resolve_var, width=140, font=FONT_UI)
+        self._ent_fps_r.grid(row=r, column=1, sticky="w", padx=10, pady=6)
+        r += 1
+
+        self._lbl_out_r = ctk.CTkLabel(tr, text="Output folder (Deliver)", font=FONT_UI, fg_color="transparent")
+        self._lbl_out_r.grid(row=r, column=0, sticky="w", padx=10, pady=6)
+        self._ent_out_r = ctk.CTkEntry(tr, textvariable=self.out_resolve_var, font=FONT_UI)
+        self._ent_out_r.grid(row=r, column=1, sticky="ew", padx=10, pady=6)
+        self._btn_out_r = ctk.CTkButton(tr, text="Browse", width=88, command=self._browse_out_resolve)
+        self._btn_out_r.grid(row=r, column=2, padx=10, pady=6)
+        r += 1
+
+        self._lbl_preset = ctk.CTkLabel(tr, text="Render preset", font=FONT_UI, fg_color="transparent")
+        self._lbl_preset.grid(row=r, column=0, sticky="w", padx=10, pady=6)
+        self._combo_preset = ctk.CTkComboBox(
+            tr,
+            variable=self.preset_var,
+            values=["YouTube - 1080p", "H.264 Master"],
+            state="normal",
             font=FONT_UI,
         )
-        self._ent_media.grid(row=r, column=1, sticky="ew", padx=10, pady=6)
-        self._btn_media = ctk.CTkButton(body, text="Browse", width=88, command=self._browse_media)
-        self._btn_media.grid(row=r, column=2, padx=10, pady=6)
-
+        self._combo_preset.grid(row=r, column=1, sticky="ew", padx=10, pady=6)
+        self._btn_presets = ctk.CTkButton(tr, text="Load presets", width=110, command=self._load_presets)
+        self._btn_presets.grid(row=r, column=2, padx=10, pady=6)
         r += 1
-        self._lbl_fps = ctk.CTkLabel(body, text="FPS (for EDL TC / FCPXML)", font=FONT_UI, fg_color="transparent")
-        self._lbl_fps.grid(row=r, column=0, sticky="w", padx=12, pady=6)
-        self._ent_fps = ctk.CTkEntry(body, textvariable=self.fps_var, width=120, font=FONT_UI)
-        self._ent_fps.grid(row=r, column=1, sticky="w", padx=10, pady=6)
 
+        self._lbl_base = ctk.CTkLabel(tr, text="Output base name", font=FONT_UI, fg_color="transparent")
+        self._lbl_base.grid(row=r, column=0, sticky="w", padx=10, pady=6)
+        self._ent_base = ctk.CTkEntry(tr, textvariable=self.base_name_var, font=FONT_UI)
+        self._ent_base.grid(row=r, column=1, columnspan=2, sticky="ew", padx=10, pady=6)
         r += 1
-        self._lbl_out = ctk.CTkLabel(body, text="Output folder", font=FONT_UI, fg_color="transparent")
-        self._lbl_out.grid(row=r, column=0, sticky="w", padx=12, pady=6)
-        self._ent_out = ctk.CTkEntry(body, textvariable=self.out_dir_var, font=FONT_UI)
-        self._ent_out.grid(row=r, column=1, columnspan=2, sticky="ew", padx=10, pady=6)
 
+        row_z = ctk.CTkFrame(tr, fg_color="transparent")
+        row_z.grid(row=r, column=1, columnspan=2, sticky="w", padx=10, pady=(4, 8))
+        self._chk_zero = ctk.CTkCheckBox(
+            row_z,
+            text="Include zero-duration markers (1 frame)",
+            variable=self.zero_duration_var,
+            font=FONT_UI,
+        )
+        self._chk_zero.pack(side="left")
         r += 1
-        row_opts = ctk.CTkFrame(body, fg_color="transparent")
-        row_opts.grid(row=r, column=1, columnspan=2, sticky="w", padx=10, pady=(4, 8))
-        self._chk_overwrite = ctk.CTkCheckBox(
-            row_opts,
+
+        self._btn_resolve = ctk.CTkButton(
+            tr,
+            text="Run Deliver (Resolve)",
+            width=200,
+            height=BTN_H,
+            command=self._run_resolve,
+        )
+        self._btn_resolve.grid(row=r, column=0, columnspan=3, padx=10, pady=12, sticky="w")
+
+        tf = self._tabs.add("ffmpeg fallback")
+        tf.grid_columnconfigure(1, weight=1)
+        r = 0
+        self._ff_hint = ctk.CTkLabel(
+            tf,
+            text="No Resolve: split one media file with ffmpeg (-c copy). Sidecar timebase must match your file.",
+            font=FONT_HINT,
+            fg_color="transparent",
+            anchor="w",
+            wraplength=820,
+        )
+        self._ff_hint.grid(row=r, column=0, columnspan=3, sticky="ew", padx=10, pady=(8, 4))
+        r += 1
+
+        self._lbl_sff = ctk.CTkLabel(tf, text="Sidecar type", font=FONT_UI, fg_color="transparent")
+        self._lbl_sff.grid(row=r, column=0, sticky="w", padx=10, pady=6)
+        self._seg_ff = ctk.CTkSegmentedButton(
+            tf,
+            values=["fcpxml", "edl"],
+            variable=self.source_ff_var,
+            font=("Segoe UI", 12),
+        )
+        self._seg_ff.grid(row=r, column=1, columnspan=2, sticky="ew", padx=10, pady=6)
+        r += 1
+
+        self._lbl_scf = ctk.CTkLabel(tf, text="FCPXML / EDL file", font=FONT_UI, fg_color="transparent")
+        self._lbl_scf.grid(row=r, column=0, sticky="w", padx=10, pady=6)
+        self._ent_scf = ctk.CTkEntry(tf, textvariable=self.sidecar_ff_var, font=FONT_UI)
+        self._ent_scf.grid(row=r, column=1, sticky="ew", padx=10, pady=6)
+        self._btn_scf = ctk.CTkButton(tf, text="Browse", width=88, command=self._browse_sidecar_ff)
+        self._btn_scf.grid(row=r, column=2, padx=10, pady=6)
+        r += 1
+
+        self._lbl_mf = ctk.CTkLabel(tf, text="Media file", font=FONT_UI, fg_color="transparent")
+        self._lbl_mf.grid(row=r, column=0, sticky="w", padx=10, pady=6)
+        self._ent_mf = ctk.CTkEntry(tf, textvariable=self.media_var, font=FONT_UI)
+        self._ent_mf.grid(row=r, column=1, sticky="ew", padx=10, pady=6)
+        self._btn_mf = ctk.CTkButton(tf, text="Browse", width=88, command=self._browse_media)
+        self._btn_mf.grid(row=r, column=2, padx=10, pady=6)
+        r += 1
+
+        self._lbl_fpsf = ctk.CTkLabel(tf, text="FPS", font=FONT_UI, fg_color="transparent")
+        self._lbl_fpsf.grid(row=r, column=0, sticky="w", padx=10, pady=6)
+        self._ent_fpsf = ctk.CTkEntry(tf, textvariable=self.fps_ff_var, width=120, font=FONT_UI)
+        self._ent_fpsf.grid(row=r, column=1, sticky="w", padx=10, pady=6)
+        r += 1
+
+        self._lbl_outf = ctk.CTkLabel(tf, text="Output folder", font=FONT_UI, fg_color="transparent")
+        self._lbl_outf.grid(row=r, column=0, sticky="w", padx=10, pady=6)
+        self._ent_outf = ctk.CTkEntry(tf, textvariable=self.out_ff_var, font=FONT_UI)
+        self._ent_outf.grid(row=r, column=1, columnspan=2, sticky="ew", padx=10, pady=6)
+        r += 1
+
+        row_ff = ctk.CTkFrame(tf, fg_color="transparent")
+        row_ff.grid(row=r, column=1, columnspan=2, sticky="w", padx=10, pady=(4, 8))
+        self._chk_ow = ctk.CTkCheckBox(
+            row_ff,
             text="Overwrite existing clips",
             variable=self.overwrite_var,
             font=FONT_UI,
         )
-        self._chk_overwrite.pack(side="left")
-
+        self._chk_ow.pack(side="left")
         r += 1
-        self._progress = ctk.CTkProgressBar(body)
-        self._progress.grid(row=r, column=0, columnspan=3, sticky="ew", padx=12, pady=(4, 4))
-        self._progress.set(0)
 
-        r += 1
-        self._log = ctk.CTkTextbox(body, wrap="word", font=("Consolas", 12))
-        self._log.grid(row=r, column=0, columnspan=3, sticky="nsew", padx=10, pady=(4, 10))
-        self._log.insert("end", "Pick sidecar + media, then Run.\n")
-        self._log.configure(state="disabled")
-
-        bar = ctk.CTkFrame(self, corner_radius=0)
-        bar.grid(row=2, column=0, sticky="ew", padx=0, pady=(0, 8))
-        self._btn_run = ctk.CTkButton(bar, text="Run autocut", width=140, height=BTN_H, command=self._run)
-        self._btn_run.pack(side="left", padx=12, pady=8)
-
-        hint = ctk.CTkLabel(
-            bar,
-            text="ffmpeg must be on PATH. Uses stream copy (-c copy). EDL: record in/out timecodes.",
-            font=FONT_HINT,
-            fg_color="transparent",
-            anchor="w",
+        self._btn_ffmpeg = ctk.CTkButton(
+            tf,
+            text="Run ffmpeg split",
+            width=180,
+            height=BTN_H,
+            command=self._run_ffmpeg,
         )
-        hint.pack(side="left", padx=8)
+        self._btn_ffmpeg.grid(row=r, column=0, columnspan=3, padx=10, pady=12, sticky="w")
 
-    def _browse_sidecar(self) -> None:
+        log_host = ctk.CTkFrame(self, corner_radius=10, border_width=1)
+        log_host.grid(row=2, column=0, sticky="nsew", padx=12, pady=(0, 8))
+        log_host.grid_rowconfigure(1, weight=1)
+        log_host.grid_columnconfigure(0, weight=1)
+        self._progress = ctk.CTkProgressBar(log_host)
+        self._progress.grid(row=0, column=0, sticky="ew", padx=10, pady=(8, 4))
+        self._progress.set(0)
+        self._log = ctk.CTkTextbox(log_host, wrap="word", font=("Consolas", 12))
+        self._log.grid(row=1, column=0, sticky="nsew", padx=10, pady=(0, 10))
+        self._log.insert("end", "Resolve tab: markers on the active timeline, or ranges from FCPXML/EDL.\n")
+        self._log.configure(state="disabled")
+        self.grid_rowconfigure(2, weight=1)
+
+    def _update_resolve_rows(self) -> None:
+        src = self.range_source_var.get()
+        need_sidecar = src in ("fcpxml", "edl")
+        st = "normal" if need_sidecar else "disabled"
+        self._ent_sc_r.configure(state=st)
+        self._btn_sc_r.configure(state=st)
+        self._ent_fps_r.configure(state=st)
+        self._lbl_sc_r.configure(text_color=self._pal["text"] if need_sidecar else self._pal["muted"])
+        self._lbl_fps_r.configure(text_color=self._pal["text"] if need_sidecar else self._pal["muted"])
+
+    def _browse_sidecar_resolve(self) -> None:
         p = filedialog.askopenfilename(
             title="FCPXML or EDL",
-            filetypes=[
-                ("Sidecar", "*.fcpxml *.xml *.edl"),
-                ("All", "*.*"),
-            ],
+            filetypes=[("Sidecar", "*.fcpxml *.xml *.edl"), ("All", "*.*")],
         )
         if p:
-            self.sidecar_var.set(p)
+            self.sidecar_resolve_var.set(p)
             low = p.lower()
             if low.endswith(".edl"):
-                self.source_var.set("edl")
+                self.range_source_var.set("edl")
             elif low.endswith(".fcpxml") or low.endswith(".xml"):
-                self.source_var.set("fcpxml")
+                self.range_source_var.set("fcpxml")
+            self._update_resolve_rows()
+
+    def _browse_out_resolve(self) -> None:
+        p = filedialog.askdirectory(title="Deliver output folder")
+        if p:
+            self.out_resolve_var.set(p)
+
+    def _browse_sidecar_ff(self) -> None:
+        p = filedialog.askopenfilename(
+            title="FCPXML or EDL",
+            filetypes=[("Sidecar", "*.fcpxml *.xml *.edl"), ("All", "*.*")],
+        )
+        if p:
+            self.sidecar_ff_var.set(p)
 
     def _browse_media(self) -> None:
         p = filedialog.askopenfilename(
@@ -235,16 +346,23 @@ class AutocutApp(ctk.CTk):
             unselected_hover_color=p["border"],
             text_color=p["text"],
         )
+        for w in (self._tr_hint, self._ff_hint):
+            w.configure(text_color=p["muted"])
         for w in (
-            self._card_title,
-            self._lbl_src,
-            self._lbl_sidecar,
-            self._lbl_media,
-            self._lbl_fps,
-            self._lbl_out,
+            self._lbl_range,
+            self._lbl_sc_r,
+            self._lbl_fps_r,
+            self._lbl_out_r,
+            self._lbl_preset,
+            self._lbl_base,
+            self._lbl_sff,
+            self._lbl_scf,
+            self._lbl_mf,
+            self._lbl_fpsf,
+            self._lbl_outf,
         ):
             w.configure(text_color=p["text"])
-        self._seg_source.configure(
+        self._seg_range.configure(
             fg_color=p["panel"],
             selected_color=p["cyan_dim"],
             selected_hover_color=p["cyan"],
@@ -252,14 +370,47 @@ class AutocutApp(ctk.CTk):
             unselected_hover_color=p["border"],
             text_color=p["text"],
         )
-        for entry in (self._ent_sidecar, self._ent_media, self._ent_fps, self._ent_out):
-            entry.configure(fg_color=p["panel"], border_color=p["border"], text_color=p["text"])
-        self._btn_run.configure(**self._button_kw("primary"))
-        for b in (self._btn_sidecar, self._btn_media):
+        self._seg_ff.configure(
+            fg_color=p["panel"],
+            selected_color=p["cyan_dim"],
+            selected_hover_color=p["cyan"],
+            unselected_color=p["panel_elev"],
+            unselected_hover_color=p["border"],
+            text_color=p["text"],
+        )
+        for e in (
+            self._ent_sc_r,
+            self._ent_fps_r,
+            self._ent_out_r,
+            self._ent_base,
+            self._ent_scf,
+            self._ent_mf,
+            self._ent_fpsf,
+            self._ent_outf,
+        ):
+            e.configure(fg_color=p["panel"], border_color=p["border"], text_color=p["text"])
+        self._combo_preset.configure(
+            fg_color=p["panel"],
+            border_color=p["border"],
+            button_color=p["panel_elev"],
+            button_hover_color=p["border"],
+            text_color=p["text"],
+        )
+        for b in (
+            self._btn_sc_r,
+            self._btn_out_r,
+            self._btn_presets,
+            self._btn_scf,
+            self._btn_mf,
+        ):
             b.configure(**self._button_kw("ghost"))
-        self._chk_overwrite.configure(text_color=p["text"])
+        self._btn_resolve.configure(**self._button_kw("primary"))
+        self._btn_ffmpeg.configure(**self._button_kw("primary"))
+        self._chk_zero.configure(text_color=p["text"])
+        self._chk_ow.configure(text_color=p["text"])
         self._progress.configure(progress_color=p["cyan"], fg_color=p["panel_elev"])
         self._log.configure(fg_color=p["panel_elev"], border_color=p["border"], text_color=p["text"])
+        self._update_resolve_rows()
 
     def _button_kw(self, variant: str) -> dict:
         p = self._pal
@@ -282,15 +433,22 @@ class AutocutApp(ctk.CTk):
         return base
 
     def _parse_progress(self, line: str) -> None:
-        if line.startswith("[progress] ") and "|" in line:
+        if "[progress]" in line and "/" in line:
             try:
-                part = line.split("|", 1)[0].replace("[progress]", "").strip()
+                part = line.split("|", 1)[0]
+                part = part.replace("[progress]", "").strip()
                 a, b = part.split("/", 1)
                 done, total = int(a), int(max(int(b), 1))
                 self._progress.set(done / total)
                 self._lbl_status.configure(text=f"{done}/{total}")
             except (ValueError, IndexError):
                 pass
+
+    def _set_busy(self, busy: bool) -> None:
+        st = "disabled" if busy else "normal"
+        self._btn_resolve.configure(state=st)
+        self._btn_ffmpeg.configure(state=st)
+        self._btn_presets.configure(state=st)
 
     def _drain_log(self) -> None:
         while True:
@@ -302,50 +460,129 @@ class AutocutApp(ctk.CTk):
             self._parse_progress(line)
         if self._worker is not None and not self._worker.is_alive():
             self._worker = None
-            self._btn_run.configure(state="normal")
+            self._set_busy(False)
             if self._lbl_status.cget("text") != "Error":
-                self._lbl_status.configure(text="Done")
+                self._lbl_status.configure(text="Ready")
         self.after(120, self._drain_log)
 
-    def _run(self) -> None:
+    def _load_presets(self) -> None:
         if self._worker is not None and self._worker.is_alive():
             return
-        sidecar = self.sidecar_var.get().strip()
+        self._btn_presets.configure(state="disabled")
+
+        def work() -> None:
+            try:
+                names = list_render_presets_sync(
+                    status_callback=lambda m: self.log_queue.put(f"[resolve] {m}\n"),
+                )
+
+                def apply_() -> None:
+                    if names:
+                        self._combo_preset.configure(values=names)
+                        cur = self.preset_var.get().strip()
+                        if cur not in names:
+                            self.preset_var.set(names[0])
+                        self.log_queue.put(f"[gui] Loaded {len(names)} preset(s).\n")
+                    else:
+                        self.log_queue.put("[gui] No presets returned.\n")
+                    self._btn_presets.configure(state="normal")
+
+                self.after(0, apply_)
+            except Exception as exc:
+                self.log_queue.put(f"[gui] Load presets failed: {exc}\n")
+                self.after(0, lambda: self._btn_presets.configure(state="normal"))
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _run_resolve(self) -> None:
+        if self._worker is not None and self._worker.is_alive():
+            return
+        src = self.range_source_var.get()
+        sidecar: Path | None = None
+        fps_o: float | None = None
+        if src in ("fcpxml", "edl"):
+            p = self.sidecar_resolve_var.get().strip()
+            if not p or not Path(p).is_file():
+                messagebox.showerror("Sidecar", "Choose a valid FCPXML or EDL file.")
+                return
+            sidecar = Path(p)
+            try:
+                fps_o = float((self.fps_resolve_var.get() or "25").replace(",", "."))
+                if fps_o <= 0:
+                    raise ValueError
+            except ValueError:
+                messagebox.showerror("FPS", "Enter a positive FPS.")
+                return
+        try:
+            out_dir = Path(self.out_resolve_var.get().strip() or str(ROOT / "exports" / "resolve_clips"))
+        except Exception:
+            messagebox.showerror("Output", "Invalid output folder.")
+            return
+
+        preset = self.preset_var.get().strip() or None
+        base = self.base_name_var.get().strip() or "chapter"
+
+        self._set_busy(True)
+        self._lbl_status.configure(text="Resolve…")
+        self._progress.set(0)
+        self._append_log("\n--- Resolve Deliver ---\n")
+
+        def work() -> None:
+            try:
+                run_resolve_deliver(
+                    range_source=src,
+                    sidecar_path=sidecar,
+                    fps_override=fps_o,
+                    out_dir=out_dir,
+                    base_name=base,
+                    preset_name=preset,
+                    include_zero_duration=self.zero_duration_var.get(),
+                    status_callback=lambda m: self.log_queue.put(m),
+                )
+                self.log_queue.put(f"Done. Output: {out_dir}\n")
+            except Exception as exc:
+                self.log_queue.put(f"ERROR: {exc}\n")
+                self.after(0, lambda: self._lbl_status.configure(text="Error"))
+
+        self._worker = threading.Thread(target=work, daemon=True)
+        self._worker.start()
+
+    def _run_ffmpeg(self) -> None:
+        if self._worker is not None and self._worker.is_alive():
+            return
+        sidecar = self.sidecar_ff_var.get().strip()
         media = self.media_var.get().strip()
         if not sidecar or not Path(sidecar).is_file():
-            messagebox.showerror("Missing file", "Choose a valid FCPXML or EDL file.")
+            messagebox.showerror("Sidecar", "Choose a valid FCPXML or EDL file.")
             return
         if not media or not Path(media).is_file():
-            messagebox.showerror("Missing file", "Choose a valid media file.")
+            messagebox.showerror("Media", "Choose a valid media file.")
             return
         try:
-            fps = float((self.fps_var.get() or "25").replace(",", "."))
+            fps = float((self.fps_ff_var.get() or "25").replace(",", "."))
             if fps <= 0:
                 raise ValueError
         except ValueError:
-            messagebox.showerror("FPS", "Enter a positive FPS number (e.g. 25 or 23.976).")
+            messagebox.showerror("FPS", "Enter a positive FPS.")
             return
 
-        out_dir = ROOT / (self.out_dir_var.get().strip() or "exports/clips")
-        src: Literal["fcpxml", "edl"] = (
-            "edl" if self.source_var.get() == "edl" else "fcpxml"
-        )
+        out_dir = Path(self.out_ff_var.get().strip() or str(ROOT / "exports" / "ffmpeg_clips"))
+        src: Literal["fcpxml", "edl"] = "edl" if self.source_ff_var.get() == "edl" else "fcpxml"
 
-        self._btn_run.configure(state="disabled")
-        self._lbl_status.configure(text="Working…")
+        self._set_busy(True)
+        self._lbl_status.configure(text="ffmpeg…")
         self._progress.set(0)
-        self._append_log("\n--- run ---\n")
+        self._append_log("\n--- ffmpeg ---\n")
 
         def work() -> None:
             try:
                 path = Path(sidecar)
                 media_path = Path(media)
-                chapters: list[Chapter]
                 if src == "fcpxml":
-                    chapters = chapters_from_fcpxml(path, fps)
+                    chapters: list[Chapter] = chapters_from_fcpxml(path, fps)
                 else:
                     chapters = chapters_from_edl(path, fps)
-                self.log_queue.put(f"Parsed {len(chapters)} segments.\n")
+                self.log_queue.put(f"Parsed {len(chapters)} segment(s).\n")
                 export_with_ffmpeg(
                     media_path,
                     chapters,
@@ -354,7 +591,7 @@ class AutocutApp(ctk.CTk):
                     overwrite=self.overwrite_var.get(),
                     log=lambda s: self.log_queue.put(s),
                 )
-                self.log_queue.put(f"Output: {out_dir}\n")
+                self.log_queue.put(f"Done. Output: {out_dir}\n")
             except Exception as exc:
                 self.log_queue.put(f"ERROR: {exc}\n")
                 self.after(0, lambda: self._lbl_status.configure(text="Error"))
