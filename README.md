@@ -7,13 +7,13 @@ Small **CustomTkinter** desktop app: batch **Deliver** in **DaVinci Resolve Stud
 ## What it does
 
 - **Resolve Studio tab**
-  - **Timeline** — Build chapters from markers: **timeline ruler** (`timeline.GetMarkers`) or **source / clip** (`MediaPoolItem` + `TimelineItem.GetMarkers` on the playhead clip, else first clip on video track 1).
-  - **Between markers only (default on)** — For *N* markers you get *N−1* exports `[M₁, M₂)`, `[M₂, M₃)` … no extra tail clip starting at the last marker.
+  - **Timeline** — Build chapters from markers:
+  - **Between markers only (default on)** — For *N* markers you get *N−1*  no extra tail clip starting at the last marker.
   - **Extend last segment** — When “between markers” is off: extend the last chapter to timeline/clip end (with optional minutes cap).
   - **FCPXML / EDL** — Ranges from file; MarkIn/MarkOut aligned to the active timeline timebase.
-  - Sequential Deliver jobs, render preset, output folder, logging.
+  - Sequential: Deliver jobs, render preset, output folder, logging.
 - **ffmpeg tab** — Sidecar + one media file → segment exports (`ffmpeg`, often `-c copy`).
-- **Settings (⚙)** — Optional Resolve install paths and default render preset; stored in `user_settings.json` (create from `user_settings.example.json`).
+- **Settings (⚙)** — Optional Resolve install paths and default render preset;
 
 ## Requirements
 
@@ -44,7 +44,7 @@ Output: `dist\MMarkerExport.exe` (see `m_marker_export.spec`). Resolve and ffmpe
 
 ## Tested with
 
-- **DaVinci Resolve Studio** 18 / 19 (Windows), scripting enabled  
+- **DaVinci Resolve Studio** 21 Beta (Windows), scripting enabled  
 - **Python** 3.12 (64-bit), **CustomTkinter** 5.2+
 
 ## Repo contents (shipped)
